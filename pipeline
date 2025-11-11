@@ -1,0 +1,71 @@
+name: Build and Push to ECR
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: homepage
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      registry: ${{ steps.ecr.outputs.registry }}
+      docker-config: ${{ steps.docker-config.outputs.docker-config }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Get ECR token and create Docker config
+        id: docker-config
+        run: |
+          ECR_TOKEN=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          DOCKER_CONFIG=$(echo "{\"auths\":{\"${{ steps.ecr.outputs.registry }}\":{\"username\":\"AWS\",\"password\":\"$ECR_TOKEN\"}}}" | base64 -w 0)
+          echo "docker-config=$DOCKER_CONFIG" >> $GITHUB_OUTPUT
+
+  build-and-push:
+    needs: setup
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/kaniko-project/executor:debug
+      options: --entrypoint=""
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker config for Kaniko
+        run: |
+          mkdir -p /kaniko/.docker
+          echo '${{ needs.setup.outputs.docker-config }}' | base64 -d > /kaniko/.docker/config.json
+
+      - name: Build and push Docker image to ECR
+        run: |
+          /kaniko/executor \
+            --context ${{ github.workspace }} \
+            --dockerfile ${{ github.workspace }}/Dockerfile \
+            --destination ${{ needs.setup.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} \
+            --destination ${{ needs.setup.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest \
+            --cache=true \
+            --cache-ttl=24h \
+            --compressed-caching=false \
+            --snapshot-mode=redo \
+            --use-new-run
+
