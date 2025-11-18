@@ -1,0 +1,355 @@
+---
+# 1. Gateway Configuration
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: api-gateway
+  namespace: default
+spec:
+  gatewayClassName: cilium
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: gateway-tls-cert
+
+---
+# 2. CiliumEnvoyConfig for JWT Authentication
+apiVersion: cilium.io/v2
+kind: CiliumEnvoyConfig
+metadata:
+  name: cognito-jwt-auth
+  namespace: default
+spec:
+  services:
+  - name: backend-app
+    namespace: default
+  resources:
+  # JWKS Cluster Definition
+  - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+    name: cognito_jwks_cluster
+    type: STRICT_DNS
+    connect_timeout: 5s
+    load_assignment:
+      cluster_name: cognito_jwks_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                # Replace with your region
+                address: cognito-idp.us-east-1.amazonaws.com
+                port_value: 443
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        sni: cognito-idp.us-east-1.amazonaws.com
+  
+  # JWT Authentication Filter
+  - "@type": type.googleapis.com/envoy.config.listener.v3.Filter
+    name: envoy.filters.http.jwt_authn
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+      providers:
+        cognito_provider:
+          # Replace with your Cognito User Pool details
+          issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXXXXX"
+          audiences:
+          - "your-app-client-id-here"
+          # JWKS endpoint for token signature verification
+          remote_jwks:
+            http_uri:
+              uri: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXXXXX/.well-known/jwks.json"
+              cluster: cognito_jwks_cluster
+              timeout: 5s
+            cache_duration:
+              seconds: 300  # Cache JWKS for 5 minutes
+          # Optional: Extract claims to headers
+          forward_payload_header: "x-jwt-payload"
+          payload_in_metadata: "jwt_payload"
+          
+      # Define authentication rules
+      rules:
+      # Public endpoints (no auth required)
+      - match:
+          prefix: "/health"
+      - match:
+          prefix: "/public"
+      
+      # Protected endpoints (require JWT)
+      - match:
+          prefix: "/api"
+        requires:
+          provider_name: "cognito_provider"
+      
+      - match:
+          prefix: "/admin"
+        requires:
+          requires_all:
+            requirements:
+            - provider_name: "cognito_provider"
+            # Require specific scope for admin routes
+            - requires_any:
+                requirements:
+                - provider_name: "cognito_provider"
+
+---
+# 3. CiliumEnvoyConfig for RBAC with JWT Claims
+apiVersion: cilium.io/v2
+kind: CiliumEnvoyConfig
+metadata:
+  name: cognito-rbac
+  namespace: default
+spec:
+  services:
+  - name: backend-app
+    namespace: default
+  resources:
+  - "@type": type.googleapis.com/envoy.config.listener.v3.Filter
+    name: envoy.filters.http.rbac
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+      rules:
+        action: ALLOW
+        policies:
+          "admin-access":
+            permissions:
+            - and_rules:
+                rules:
+                - header:
+                    name: ":path"
+                    prefix_match: "/admin"
+            principals:
+            - and_ids:
+                ids:
+                - metadata:
+                    filter: "envoy.filters.http.jwt_authn"
+                    path:
+                    - key: "jwt_payload"
+                    - key: "cognito:groups"
+                    value:
+                      list_match:
+                        one_of:
+                          string_match:
+                            exact: "admin"
+          
+          "user-access":
+            permissions:
+            - header:
+                name: ":path"
+                prefix_match: "/api"
+            principals:
+            - metadata:
+                filter: "envoy.filters.http.jwt_authn"
+                path:
+                - key: "jwt_payload"
+
+---
+# 4. HTTPRoute with JWT Auth
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: backend-route
+  namespace: default
+spec:
+  parentRefs:
+  - name: api-gateway
+  
+  rules:
+  # Public route - no auth
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /public
+    backendRefs:
+    - name: backend-app
+      port: 8080
+  
+  # Protected API routes - requires JWT
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /api
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: cilium.io
+        kind: CiliumEnvoyConfig
+        name: cognito-jwt-auth
+    backendRefs:
+    - name: backend-app
+      port: 8080
+  
+  # Admin routes - requires JWT + admin group
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /admin
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: cilium.io
+        kind: CiliumEnvoyConfig
+        name: cognito-jwt-auth
+    - type: ExtensionRef
+      extensionRef:
+        group: cilium.io
+        kind: CiliumEnvoyConfig
+        name: cognito-rbac
+    backendRefs:
+    - name: backend-app
+      port: 8080
+
+---
+# 5. Example Backend Application Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-app
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: app
+        image: your-app-image:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: JWT_HEADER
+          value: "x-jwt-payload"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-app
+  namespace: default
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 8080
+    targetPort: 8080
+
+---
+# 6. NetworkPolicy (Optional - Cilium Network Policy for additional security)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backend-app-policy
+  namespace: default
+spec:
+  endpointSelector:
+    matchLabels:
+      app: backend
+  ingress:
+  - fromEndpoints:
+    - matchLabels:
+        io.kubernetes.pod.namespace: cilium-gateway
+    toPorts:
+    - ports:
+      - port: "8080"
+        protocol: TCP
+
+---
+# 7. Example: Advanced JWT Auth with Multiple Providers
+apiVersion: cilium.io/v2
+kind: CiliumEnvoyConfig
+metadata:
+  name: multi-idp-auth
+  namespace: default
+spec:
+  services:
+  - name: backend-app
+    namespace: default
+  resources:
+  - "@type": type.googleapis.com/envoy.config.listener.v3.Filter
+    name: envoy.filters.http.jwt_authn
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+      providers:
+        # AWS Cognito
+        cognito:
+          issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXXXXX"
+          audiences:
+          - "cognito-client-id"
+          remote_jwks:
+            http_uri:
+              uri: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXXXXX/.well-known/jwks.json"
+              cluster: cognito_jwks_cluster
+              timeout: 5s
+        
+        # Auth0 (example of multiple providers)
+        auth0:
+          issuer: "https://your-tenant.auth0.com/"
+          audiences:
+          - "auth0-client-id"
+          remote_jwks:
+            http_uri:
+              uri: "https://your-tenant.auth0.com/.well-known/jwks.json"
+              cluster: auth0_jwks_cluster
+              timeout: 5s
+      
+      rules:
+      - match:
+          prefix: "/api"
+        requires:
+          requires_any:
+            requirements:
+            - provider_name: "cognito"
+            - provider_name: "auth0"
+
+---
+# 8. CiliumEnvoyConfig for Custom Claim Validation
+apiVersion: cilium.io/v2
+kind: CiliumEnvoyConfig
+metadata:
+  name: custom-claims-validation
+  namespace: default
+spec:
+  services:
+  - name: backend-app
+    namespace: default
+  resources:
+  - "@type": type.googleapis.com/envoy.config.listener.v3.Filter
+    name: envoy.filters.http.lua
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+      inline_code: |
+        function envoy_on_request(request_handle)
+          local metadata = request_handle:metadata():get("envoy.filters.http.jwt_authn")
+          
+          if metadata then
+            local jwt_payload = metadata["jwt_payload"]
+            
+            -- Extract custom claims
+            local user_email = jwt_payload["email"]
+            local user_groups = jwt_payload["cognito:groups"]
+            local custom_scope = jwt_payload["scope"]
+            
+            -- Add claims as headers for backend
+            request_handle:headers():add("x-user-email", user_email or "")
+            request_handle:headers():add("x-user-groups", table.concat(user_groups or {}, ","))
+            request_handle:headers():add("x-user-scope", custom_scope or "")
+            
+            -- Custom validation logic
+            if string.find(custom_scope or "", "read:sensitive") then
+              request_handle:headers():add("x-has-sensitive-access", "true")
+            end
+          end
+        end

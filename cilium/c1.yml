@@ -1,0 +1,51 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: protected-app
+spec:
+  parentRefs:
+  - name: my-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /api
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: cilium.io
+        kind: CiliumEnvoyConfig
+        name: jwt-auth
+    backendRefs:
+    - name: my-app-service
+      port: 80
+---
+apiVersion: cilium.io/v2
+kind: CiliumEnvoyConfig
+metadata:
+  name: jwt-auth
+spec:
+  services:
+  - name: my-app
+    namespace: default
+  resources:
+  - "@type": type.googleapis.com/envoy.config.listener.v3.Filter
+    name: envoy.filters.http.jwt_authn
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+      providers:
+        cognito:
+          issuer: "https://cognito-idp.{region}.amazonaws.com/{userPoolId}"
+          audiences:
+          - "your-app-client-id"
+          remote_jwks:
+            http_uri:
+              uri: "https://cognito-idp.{region}.amazonaws.com/{userPoolId}/.well-known/jwks.json"
+              cluster: cognito_jwks
+              timeout: 5s
+      rules:
+      - match:
+          prefix: "/"
+        requires:
+          provider_name: "cognito"
+---

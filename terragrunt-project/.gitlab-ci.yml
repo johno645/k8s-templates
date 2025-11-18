@@ -1,0 +1,82 @@
+stages:
+  - validate
+  - plan
+  - apply
+
+variables:
+  TF_ROOT: ${CI_PROJECT_DIR}
+  TF_VERSION: "1.6.0"
+  TERRAGRUNT_VERSION: "0.54.0"
+
+before_script:
+  - apt-get update && apt-get install -y curl unzip
+  - curl -fsSL https://apt.releases.hashicorp.com/gpg | apt-key add -
+  - apt-get update && apt-get install -y terraform=${TF_VERSION}
+  - curl -L https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64 -o /usr/local/bin/terragrunt
+  - chmod +x /usr/local/bin/terragrunt
+
+validate:dev:
+  stage: validate
+  script:
+    - export TG_ENVIRONMENT=dev
+    - export TG_GITLAB_PROJECT_ID=$(grep 'gitlab_project_id' terraform.dev.tfvars | cut -d'=' -f2 | tr -d ' "')
+    - terragrunt run-all validate --terragrunt-working-dir app1 --terragrunt-working-dir app2
+  only:
+    - merge_requests
+
+validate:prod:
+  stage: validate
+  script:
+    - export TG_ENVIRONMENT=prod
+    - export TG_GITLAB_PROJECT_ID=$(grep 'gitlab_project_id' terraform.prod.tfvars | cut -d'=' -f2 | tr -d ' "')
+    - terragrunt run-all validate --terragrunt-working-dir app1 --terragrunt-working-dir app2
+  only:
+    - merge_requests
+
+plan:dev:
+  stage: plan
+  script:
+    - export TG_ENVIRONMENT=dev
+    - export TG_GITLAB_PROJECT_ID=$(grep 'gitlab_project_id' terraform.dev.tfvars | cut -d'=' -f2 | tr -d ' "')
+    - terragrunt run-all plan -var-file=terraform.dev.tfvars --terragrunt-working-dir app1 --terragrunt-working-dir app2
+  artifacts:
+    paths:
+      - app*/tfplan
+    expire_in: 7 days
+  only:
+    - merge_requests
+
+plan:prod:
+  stage: plan
+  script:
+    - export TG_ENVIRONMENT=prod
+    - export TG_GITLAB_PROJECT_ID=$(grep 'gitlab_project_id' terraform.prod.tfvars | cut -d'=' -f2 | tr -d ' "')
+    - terragrunt run-all plan -var-file=terraform.prod.tfvars --terragrunt-working-dir app1 --terragrunt-working-dir app2
+  artifacts:
+    paths:
+      - app*/tfplan
+    expire_in: 7 days
+  only:
+    - merge_requests
+
+apply:dev:
+  stage: apply
+  script:
+    - export TG_ENVIRONMENT=dev
+    - export TG_GITLAB_PROJECT_ID=$(grep 'gitlab_project_id' terraform.dev.tfvars | cut -d'=' -f2 | tr -d ' "')
+    - terragrunt run-all apply -auto-approve -var-file=terraform.dev.tfvars --terragrunt-working-dir app1 --terragrunt-working-dir app2
+  dependencies:
+    - plan:dev
+  only:
+    - develop
+
+apply:prod:
+  stage: apply
+  script:
+    - export TG_ENVIRONMENT=prod
+    - export TG_GITLAB_PROJECT_ID=$(grep 'gitlab_project_id' terraform.prod.tfvars | cut -d'=' -f2 | tr -d ' "')
+    - terragrunt run-all apply -auto-approve -var-file=terraform.prod.tfvars --terragrunt-working-dir app1 --terragrunt-working-dir app2
+  dependencies:
+    - plan:prod
+  only:
+    - main
