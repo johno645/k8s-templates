@@ -1,0 +1,29 @@
+# Terraform files
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl
+
+# Terragrunt cache
+.terragrunt-cache/
+
+# Generated files - but allow database module's custom provider
+backend.tf
+provider.tf
+!modules/database/provider.tf
+
+# Environment-specific files (keep .example files)
+env.hcl
+!env.hcl.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
