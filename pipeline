@@ -1,3 +1,37 @@
+// Allow dev1 user to access /dev1 path
+permit(
+    principal,
+    action,
+    resource
+)
+when {
+    context.verifiedaccess.identity.username == "dev1" &&
+    context.verifiedaccess.http_request.path.starts_with("/dev1")
+};
+
+// Explicit deny for dev1 trying to access other paths
+forbid(
+    principal,
+    action,
+    resource
+)
+when {
+    context.verifiedaccess.identity.username == "dev1" &&
+    !context.verifiedaccess.http_request.path.starts_with("/dev1")
+};
+
+// Deny all other users from accessing /dev1
+forbid(
+    principal,
+    action,
+    resource
+)
+when {
+    context.verifiedaccess.identity.username != "dev1" &&
+    context.verifiedaccess.http_request.path.starts_with("/dev1")
+};
+
+
 name: Build and Push to ECR
 
 on:
