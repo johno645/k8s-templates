@@ -122,3 +122,145 @@ echo -e "${RED}Remember:${NC} All team members will need to update their local r
 echo "They should run: git fetch origin && git reset --hard origin/${CURRENT_BRANCH}"
 echo ""
 echo -e "${GREEN}Script completed successfully!${NC}"
+
+#!/bin/bash
+
+# Script to delete all S3 buckets matching the pattern “app-*”
+
+# This script will empty buckets before deletion if they contain objects
+
+set -e  # Exit on error
+
+# Color codes for output
+
+RED=’\033[0;31m’
+GREEN=’\033[0;32m’
+YELLOW=’\033[1;33m’
+NC=’\033[0m’ # No Color
+
+# Function to check if AWS CLI is installed
+
+check_aws_cli() {
+if ! command -v aws &> /dev/null; then
+echo -e “${RED}Error: AWS CLI is not installed${NC}”
+exit 1
+fi
+}
+
+# Function to empty a bucket
+
+empty_bucket() {
+local bucket_name=$1
+echo -e “${YELLOW}Emptying bucket: $bucket_name${NC}”
+
+```
+# Delete all object versions (for versioned buckets)
+aws s3api delete-objects \
+    --bucket "$bucket_name" \
+    --delete "$(aws s3api list-object-versions \
+        --bucket "$bucket_name" \
+        --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+        --output json)" 2>/dev/null || true
+
+# Delete all delete markers (for versioned buckets)
+aws s3api delete-objects \
+    --bucket "$bucket_name" \
+    --delete "$(aws s3api list-object-versions \
+        --bucket "$bucket_name" \
+        --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
+        --output json)" 2>/dev/null || true
+
+# Delete all objects using s3 rm (for non-versioned buckets or remaining objects)
+aws s3 rm "s3://$bucket_name" --recursive 2>/dev/null || true
+
+echo -e "${GREEN}Bucket emptied: $bucket_name${NC}"
+```
+
+}
+
+# Function to delete a bucket
+
+delete_bucket() {
+local bucket_name=$1
+echo -e “${YELLOW}Deleting bucket: $bucket_name${NC}”
+
+```
+if aws s3api delete-bucket --bucket "$bucket_name" 2>/dev/null; then
+    echo -e "${GREEN}Successfully deleted: $bucket_name${NC}"
+    return 0
+else
+    echo -e "${RED}Failed to delete: $bucket_name${NC}"
+    return 1
+fi
+```
+
+}
+
+# Main script
+
+main() {
+check_aws_cli
+
+```
+echo -e "${YELLOW}Fetching all S3 buckets matching pattern 'app-*'...${NC}"
+
+# Get all buckets matching the pattern
+buckets=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'app-')].Name" --output text)
+
+if [ -z "$buckets" ]; then
+    echo -e "${YELLOW}No buckets found matching pattern 'app-*'${NC}"
+    exit 0
+fi
+
+# Count buckets
+bucket_count=$(echo "$buckets" | wc -w)
+echo -e "${YELLOW}Found $bucket_count bucket(s) to delete:${NC}"
+echo "$buckets" | tr '\t' '\n'
+
+# Ask for confirmation
+echo ""
+read -p "Are you sure you want to delete these buckets? (yes/no): " confirmation
+
+if [ "$confirmation" != "yes" ]; then
+    echo -e "${YELLOW}Operation cancelled${NC}"
+    exit 0
+fi
+
+# Process each bucket
+success_count=0
+fail_count=0
+
+for bucket in $buckets; do
+    echo ""
+    echo -e "${YELLOW}Processing: $bucket${NC}"
+    
+    # Empty the bucket first
+    if empty_bucket "$bucket"; then
+        # Then delete the bucket
+        if delete_bucket "$bucket"; then
+            ((success_count++))
+        else
+            ((fail_count++))
+        fi
+    else
+        echo -e "${RED}Failed to empty bucket: $bucket${NC}"
+        ((fail_count++))
+    fi
+done
+
+# Summary
+echo ""
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}Deletion Summary:${NC}"
+echo -e "${GREEN}Successfully deleted: $success_count${NC}"
+if [ $fail_count -gt 0 ]; then
+    echo -e "${RED}Failed to delete: $fail_count${NC}"
+fi
+echo -e "${GREEN}========================================${NC}"
+```
+
+}
+
+# Run main function
+
+main
