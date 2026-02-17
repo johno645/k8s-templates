@@ -113,4 +113,60 @@ def lambda_handler(event, context):
     {
         "source_bucket": "my-bucket",
         "source_key": "path/to/encrypted.zip",
-        "secret_name": "my-zip​​​​​​​​​​​​​​​​
+        "secret_name": "my-zip-password",
+        "destination_bucket": "my-output-bucket",   # optional
+        "destination_prefix": "extracted/"           # optional
+    }
+    """
+    try:
+        source_bucket = event.get('source_bucket')
+        source_key = event.get('source_key')
+        secret_name = event.get('secret_name')
+        destination_bucket = event.get('destination_bucket', source_bucket)
+        destination_prefix = event.get('destination_prefix', '')
+
+        if not all([source_bucket, source_key, secret_name]):
+            raise ValueError("Missing required parameters: source_bucket, source_key, secret_name")
+
+        print(f"Processing: s3://{source_bucket}/{source_key}")
+
+        password = get_secret(secret_name)
+        zip_data = download_from_s3(source_bucket, source_key)
+        extracted_files = unzip_file(zip_data, password)
+
+        uploaded_files = []
+        for filename, content in extracted_files.items():
+            if destination_prefix:
+                destination_key = f"{destination_prefix.rstrip('/')}/{filename}"
+            else:
+                source_dir = os.path.dirname(source_key)
+                destination_key = f"{source_dir}/{filename}" if source_dir else filename
+
+            upload_to_s3(destination_bucket, destination_key, content)
+            uploaded_files.append({
+                'filename': filename,
+                's3_location': f"s3://{destination_bucket}/{destination_key}",
+                'size': len(content)
+            })
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Successfully extracted zip file',
+                'source': f"s3://{source_bucket}/{source_key}",
+                'files_extracted': len(uploaded_files),
+                'files': uploaded_files
+            })
+        }
+
+    except ValueError as e:
+        return {
+            'statusCode': 400,
+            'body': json.dumps({'error': 'Validation error', 'message': str(e)})
+        }
+    except Exception as e:
+        print(f"Error: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': 'Internal error', 'message': str(e)})
+        }
