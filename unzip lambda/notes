@@ -1,3 +1,7 @@
+sudo sshd -T | grep -E "passwordauthentication|kbdinteractiveauthentication|usepam|gssapi|pubkeyauthentication"
+
+
+
 Good question. The short answer is **no, not reliably**. Python's built-in `zipfile` module has significant limitations with AES-256 encryption.
 
 ## The Problem
